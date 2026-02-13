@@ -6,8 +6,8 @@ SSD1309/SSD1306 OLED RSSリーダー (I2C/SPI両対応)
 ファイル名    : SSD1309-RSS.py
 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
 作成者        : Akihiko Fuji
-更新日        : 2026/01/12
-バージョン    : 1.8
+更新日        : 2026/02/13
+バージョン    : 1.8.1
 ------------------------------------------------
 Raspberry Pi + luma.oled環境で動作する日本語対応RSSビューワー。
 複数RSSソースを巡回し、記事を自動スクロール表示します。
@@ -661,6 +661,7 @@ class RSSReaderApp:
         with self._state_lock:
             self.news_items = snapshot
             self._desc_width_cache.clear()
+            self._normalize_current_indices_locked()
 
         self.failover_snapshot = {
             idx: list(items) for idx, items in snapshot.items()
@@ -677,8 +678,29 @@ class RSSReaderApp:
                 idx: list(items) for idx, items in self.failover_snapshot.items()
             }
             self._desc_width_cache.clear()
+            self._normalize_current_indices_locked()
         self.log.warning("Restored news items from failover cache")
         return True
+
+
+    # 現在のフィード/記事インデックスを有効範囲へ補正する（ロック下専用）
+    def _normalize_current_indices_locked(self) -> None:
+        if not self.rss_feeds:
+            self.current_feed_index = 0
+            self.current_item_index = 0
+            return
+
+        if self.current_feed_index < 0 or self.current_feed_index >= len(self.rss_feeds):
+            self.current_feed_index = 0
+
+        items = self.news_items.get(self.current_feed_index, [])
+        if not items:
+            self.current_item_index = 0
+            return
+
+        if self.current_item_index < 0 or self.current_item_index >= len(items):
+            self.current_item_index = 0
+
 
     # 部分的な取得失敗をログに通知する
     def _handle_partial_failures(self, errors: Dict[int, Exception]) -> None:
@@ -1006,6 +1028,15 @@ class RSSReaderApp:
                 return
             feed_idx = self.current_feed_index
             item_idx = self.current_item_index
+            if item_idx < 0 or item_idx >= len(self.news_items[feed_idx]):
+                self.log.warning(
+                    "Detected stale item index (feed=%d item=%d); resetting to 0",
+                    feed_idx,
+                    item_idx,
+                )
+                self.current_item_index = 0
+                self._reset_article_state(transition_direction=-1)
+                return
             item = self.news_items[feed_idx][item_idx]
             current_time = time.monotonic()
             elapsed_time = current_time - self.article_start_time
